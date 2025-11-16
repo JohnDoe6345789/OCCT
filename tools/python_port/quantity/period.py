@@ -29,6 +29,17 @@ class QuantityPeriod:
 
     __slots__ = ("_seconds", "_microseconds")
 
+    @staticmethod
+    def _require_quantity_period(value: object) -> "QuantityPeriod":
+        """Ensure ``value`` is a ``QuantityPeriod`` instance."""
+
+        if not isinstance(value, QuantityPeriod):
+            raise TypeError(
+                "QuantityPeriod operations require another QuantityPeriod, "
+                f"got {type(value).__name__}"
+            )
+        return value
+
     def __init__(
         self,
         days: int = 0,
@@ -112,11 +123,12 @@ class QuantityPeriod:
     # Arithmetic
     # ------------------------------------------------------------------
     def copy(self) -> "QuantityPeriod":
-        return QuantityPeriod.from_seconds(self._seconds, self._microseconds)
+        return type(self).from_seconds(self._seconds, self._microseconds)
 
     def subtract(self, other: "QuantityPeriod") -> "QuantityPeriod":
         """Return ``self - other`` following the C++ implementation."""
 
+        other = self._require_quantity_period(other)
         result = self.copy()
         result._seconds -= other._seconds
         result._microseconds -= other._microseconds
@@ -135,12 +147,15 @@ class QuantityPeriod:
 
         return result
 
-    def __sub__(self, other: "QuantityPeriod") -> "QuantityPeriod":
+    def __sub__(self, other: object) -> "QuantityPeriod":
+        if not isinstance(other, QuantityPeriod):
+            return NotImplemented
         return self.subtract(other)
 
     def add(self, other: "QuantityPeriod") -> "QuantityPeriod":
         """Return ``self + other`` following the C++ implementation."""
 
+        other = self._require_quantity_period(other)
         result = self.copy()
         result._seconds += other._seconds
         result._microseconds += other._microseconds
@@ -149,13 +164,16 @@ class QuantityPeriod:
             result._seconds += 1
         return result
 
-    def __add__(self, other: "QuantityPeriod") -> "QuantityPeriod":
+    def __add__(self, other: object) -> "QuantityPeriod":
+        if not isinstance(other, QuantityPeriod):
+            return NotImplemented
         return self.add(other)
 
     # ------------------------------------------------------------------
     # Comparisons
     # ------------------------------------------------------------------
     def is_equal(self, other: "QuantityPeriod") -> bool:
+        other = self._require_quantity_period(other)
         return self._seconds == other._seconds and self._microseconds == other._microseconds
 
     def __eq__(self, other: object) -> bool:
@@ -164,23 +182,29 @@ class QuantityPeriod:
         return self.is_equal(other)
 
     def is_shorter(self, other: "QuantityPeriod") -> bool:
+        other = self._require_quantity_period(other)
         if self._seconds < other._seconds:
             return True
         if self._seconds > other._seconds:
             return False
         return self._microseconds < other._microseconds
 
-    def __lt__(self, other: "QuantityPeriod") -> bool:
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, QuantityPeriod):
+            return NotImplemented
         return self.is_shorter(other)
 
     def is_longer(self, other: "QuantityPeriod") -> bool:
+        other = self._require_quantity_period(other)
         if self._seconds > other._seconds:
             return True
         if self._seconds < other._seconds:
             return False
         return self._microseconds > other._microseconds
 
-    def __gt__(self, other: "QuantityPeriod") -> bool:
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, QuantityPeriod):
+            return NotImplemented
         return self.is_longer(other)
 
     # ------------------------------------------------------------------
