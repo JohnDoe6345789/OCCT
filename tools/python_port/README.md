@@ -15,7 +15,9 @@ Currently available ports:
 The `codex_cli.py` helper automates the "Continue with python port until
 feature parity" workflow used in Codex prompts.  It records each prompt run and
 captures the current git status in a pseudo pull-request payload so the steps
-can be repeated deterministically.
+can be repeated deterministically.  Each automation cycle includes a reference
+to <https://github.com/openai/codex?tab=readme-ov-file> so coders know which
+public instructions to follow.
 
 Run the automation with the default prompt:
 

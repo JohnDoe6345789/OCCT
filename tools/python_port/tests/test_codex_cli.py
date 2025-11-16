@@ -45,6 +45,7 @@ def test_pull_request_manager_creates_and_approves(tmp_path: Path):
     assert pr.title == "codex: demo prompt"
     assert "demo prompt" in pr.body
     assert pr.branch == "feature/codex"
+    assert codex_cli.CODEX_REFERENCE in pr.body
     assert pr_path.exists()
 
     approved = manager.approve(pr_path)
