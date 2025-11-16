@@ -12,24 +12,14 @@ Currently available ports:
 
 ## Codex automation CLI
 
-The `codex_cli.py` helper automates the "Continue with python port until
-feature parity" workflow used in Codex prompts.  It records each prompt run and
-captures the current git status in a pseudo pull-request payload so the steps
-can be repeated deterministically.  Each automation cycle includes a reference
-to <https://github.com/openai/codex?tab=readme-ov-file> so coders know which
-public instructions to follow.
-
-Run the automation with the default prompt:
-
-```bash
-python tools/python_port/codex_cli.py
-```
-
-To preview the steps without touching the filesystem, enable `--dry-run`:
-
-```bash
-python tools/python_port/codex_cli.py --dry-run
-```
+The Codex automation workflow has been rewritten in TypeScript and moved to
+[`tools/typescript_port`](../typescript_port).  It records each prompt run,
+captures the current git status in a pseudo pull-request payload, and calls the
+public <https://chatgpt.com/codex> API for every prompt execution so the
+automation mirrors the real Codex workflow.  Each automation cycle includes a
+reference to <https://github.com/openai/codex?tab=readme-ov-file> so coders know
+which public instructions to follow.  See the new README for install and usage
+details.
 
 ## Quick start
 
