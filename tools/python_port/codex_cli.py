@@ -16,7 +16,11 @@ import subprocess
 import textwrap
 from typing import Callable, Dict, Iterable, List, Optional
 
-DEFAULT_PROMPT = "Continue with python port until feature parity"
+CODEX_REFERENCE = "https://github.com/openai/codex?tab=readme-ov-file"
+DEFAULT_PROMPT = (
+    "Continue with python port until feature parity using instructions from "
+    f"{CODEX_REFERENCE}"
+)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_PATH = Path(__file__).resolve().with_name("codex_prompts.jsonl")
 PR_PATH = Path(__file__).resolve().with_name("codex_pull_request.json")
@@ -97,6 +101,8 @@ class PullRequestManager:
             Status:\n{status}
 
             Diffstat:\n{diffstat}
+
+            Codex reference:\n{CODEX_REFERENCE}
             """
         ).strip()
         pr = PullRequest(title=title, branch=branch, body=body)
