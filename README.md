@@ -62,3 +62,11 @@ For information regarding OCCT code development, please consult the official OCC
 ### Forum and Discussions
 - [OCCT Forums](https://dev.opencascade.org/forums)
 - [GitHub Discussions](https://github.com/Open-Cascade-SAS/OCCT/discussions)
+
+## Python Ports
+
+The `tools/python_port/` directory contains lightweight Python translations of
+selected OCCT utilities.  These modules are useful when you want to experiment
+with small algorithms—such as `Quantity_Period` from
+`src/FoundationClasses/TKernel/Quantity`—without compiling the full C++
+toolchain.
