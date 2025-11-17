@@ -22,6 +22,8 @@
 !/src/
 !/tests/
 !/tools/
+!/python_port/
+!/conversion_tools/
 !/.github/
 
 # data/ level: Ignore everything except tracked subdirectories
@@ -87,6 +89,19 @@ win64
 
 # Emacs backup files
 *~
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
 
 # Generated files
 /*.am

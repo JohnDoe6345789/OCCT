@@ -12,8 +12,8 @@ Currently available ports:
 
 ## Codex automation CLI
 
-The Codex automation workflow has been rewritten in TypeScript and moved to
-[`tools/typescript_port`](../typescript_port).  It records each prompt run,
+The Codex automation workflow has been rewritten in TypeScript and is available in
+[`tools/typescript_port`](../tools/typescript_port).  It records each prompt run,
 captures the current git status in a pseudo pull-request payload, and calls the
 public <https://chatgpt.com/codex> API for every prompt execution so the
 automation mirrors the real Codex workflow.  Each automation cycle includes a
@@ -24,7 +24,7 @@ details.
 ## Quick start
 
 ```python
-from tools.python_port import QuantityPeriod
+from python_port.quantity import QuantityPeriod
 
 # Build a period by composing days/hours/minutes/seconds components.
 period = QuantityPeriod(hours=1, minutes=30, seconds=15)

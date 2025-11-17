@@ -65,8 +65,24 @@ For information regarding OCCT code development, please consult the official OCC
 
 ## Python Ports
 
-The `tools/python_port/` directory contains lightweight Python translations of
-selected OCCT utilities.  These modules are useful when you want to experiment
-with small algorithms—such as `Quantity_Period` from
-`src/FoundationClasses/TKernel/Quantity`—without compiling the full C++
-toolchain.
+The `python_port/` directory contains lightweight Python translations of OCCT utilities.
+These modules are useful when you want to experiment with algorithms without compiling
+the full C++ toolchain.
+
+### Currently Available
+
+- `python_port/quantity/period.py`: Translation of `src/FoundationClasses/TKernel/Quantity/Quantity_Period.cxx`
+
+### Conversion Tools
+
+Automated tooling for converting OCCT C/C++ code to Python is available in `conversion_tools/`:
+
+```bash
+# Analyze source structure and conversion priority
+python conversion_tools/conversion_runner.py --analyze
+
+# Convert a specific module
+python conversion_tools/conversion_runner.py --module FoundationClasses --toolkit TKernel
+```
+
+See [`conversion_tools/README.md`](conversion_tools/README.md) for detailed usage and [`python_port/CONVERSION_GUIDE.md`](python_port/CONVERSION_GUIDE.md) for conversion strategy.

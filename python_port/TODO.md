@@ -3,6 +3,8 @@
 This backlog tracks the next steps for the lightweight OCCT Python ports so
 that contributors can coordinate efforts.
 
+**For automated conversion tasks, see [`../conversion_tools/`](../conversion_tools/)**
+
 ## Infrastructure
 
 - [ ] Publish the modules as an installable package (``python_port``) so they
