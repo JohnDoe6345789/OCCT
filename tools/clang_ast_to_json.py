@@ -69,6 +69,17 @@ NOEXCEPT_KINDS: Set[ExceptionSpecificationKind] = {
 if hasattr(ExceptionSpecificationKind, "COMPUTED_NOEXCEPT"):
     NOEXCEPT_KINDS.add(getattr(ExceptionSpecificationKind, "COMPUTED_NOEXCEPT"))
 
+NON_TYPE_TEMPLATE_PARAM_KIND = getattr(CursorKind, "NON_TYPE_TEMPLATE_PARAMETER", None)
+if NON_TYPE_TEMPLATE_PARAM_KIND is None:
+    NON_TYPE_TEMPLATE_PARAM_KIND = getattr(CursorKind, "TEMPLATE_NON_TYPE_PARAMETER", None)
+
+TEMPLATE_PARAM_KINDS: List[CursorKind] = [
+    CursorKind.TEMPLATE_TYPE_PARAMETER,
+    CursorKind.TEMPLATE_TEMPLATE_PARAMETER,
+]
+if NON_TYPE_TEMPLATE_PARAM_KIND is not None:
+    TEMPLATE_PARAM_KINDS.append(NON_TYPE_TEMPLATE_PARAM_KIND)
+
 
 def configure_libclang(explicit_library: Optional[str]) -> Optional[Path]:
     """
@@ -140,6 +151,30 @@ def access_name(access: AccessSpecifier) -> str:
         AccessSpecifier.PROTECTED: "protected",
     }
     return mapping.get(access, "public")
+
+
+def base_is_virtual(cursor: Cursor) -> bool:
+    """
+    Return whether a base specifier is virtual, falling back to False on older
+    libclang bindings that lack Cursor.is_virtual_base().
+    """
+    checker = getattr(cursor, "is_virtual_base", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except Exception:
+        return False
+
+
+def is_inline_namespace(cursor: Cursor) -> bool:
+    checker = getattr(cursor, "is_inline_namespace", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except Exception:
+        return False
 
 
 def type_to_json(tp: Type) -> Dict[str, Any]:
@@ -311,7 +346,7 @@ def record_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Dic
             bases.append(
                 {
                     "access": access_name(child.access_specifier),
-                    "is_virtual": child.is_virtual_base(),
+                    "is_virtual": base_is_virtual(child),
                     "type": type_to_json(child.type),
                 }
             )
@@ -358,11 +393,7 @@ def class_template_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]
     members: List[Dict[str, Any]] = []
 
     for child in cursor.get_children():
-        if child.kind in (
-            CursorKind.TEMPLATE_TYPE_PARAMETER,
-            CursorKind.NON_TYPE_TEMPLATE_PARAMETER,
-            CursorKind.TEMPLATE_TEMPLATE_PARAMETER,
-        ):
+        if child.kind in TEMPLATE_PARAM_KINDS:
             params.append(
                 {
                     "kind": child.kind.name.lower(),
@@ -414,11 +445,7 @@ def function_template_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[s
     params: List[Dict[str, Any]] = []
     func_decl: Optional[Cursor] = None
     for child in cursor.get_children():
-        if child.kind in (
-            CursorKind.TEMPLATE_TYPE_PARAMETER,
-            CursorKind.NON_TYPE_TEMPLATE_PARAMETER,
-            CursorKind.TEMPLATE_TEMPLATE_PARAMETER,
-        ):
+        if child.kind in TEMPLATE_PARAM_KINDS:
             params.append(
                 {
                     "kind": child.kind.name.lower(),
@@ -451,7 +478,7 @@ def namespace_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> 
     return {
         "kind": "namespace",
         "name": cursor.spelling,
-        "inline": cursor.is_inline_namespace(),
+        "inline": is_inline_namespace(cursor),
         "decls": decls,
     }
 
