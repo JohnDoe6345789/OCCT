@@ -24,6 +24,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from uuid import uuid4
 
+try:
+    import curses
+except Exception:  # pragma: no cover - platform dependent
+    curses = None
+
 import clang
 from clang import cindex
 from clang.cindex import (
@@ -176,7 +181,7 @@ def detect_resource_includes() -> List[str]:
 
 
 def gather_sources(
-    root: Path, extensions: Sequence[str], progress: Optional[ProgressReporter] = None
+    root: Path, extensions: Sequence[str], ui: Optional[Any] = None
 ) -> List[Path]:
     exts = {ext.lower() for ext in extensions}
     matches: List[Path] = []
@@ -185,8 +190,8 @@ def gather_sources(
     try:
         for counter, path in enumerate(root.rglob("*"), start=1):
             last_path = path
-            if progress and (counter == 1 or counter % 200 == 0):
-                progress.update(counter, path, root)
+            if ui and (counter == 1 or counter % 200 == 0):
+                ui.scan_update(counter, path)
             if (
                 path.suffix.lower() in exts
                 and path.is_file()
@@ -194,10 +199,10 @@ def gather_sources(
             ):
                 matches.append(path)
     finally:
-        if progress:
+        if ui:
             if counter and (counter % 200) != 0:
-                progress.update(counter, last_path, root)
-            progress.finish(total_override=counter or len(matches))
+                ui.scan_update(counter, last_path)
+            ui.scan_finish(counter or len(matches))
     return sorted(matches)
 
 
@@ -595,6 +600,13 @@ def namespace_to_json(
     )
 
 
+def cursor_status(cursor: Cursor) -> str:
+    kind = cursor.kind.name.lower()
+    name = cursor.spelling or cursor.displayname or "<anonymous>"
+    status = f"{kind}: {name}"
+    return status if len(status) <= 120 else status[:117] + "..."
+
+
 def cursor_to_decl(
     cursor: Cursor, roots: Iterable[Path], seen: Set[str], parent_id: Optional[str]
 ) -> Optional[Dict[str, Any]]:
@@ -746,7 +758,9 @@ class ProgressReporter:
         except ValueError:
             return str(path)
 
-    def update(self, completed: int, path: Path, root: Path) -> None:
+    def update(
+        self, completed: int, path: Path, root: Path, status: Optional[str] = None
+    ) -> None:
         self.last_completed = completed
         if not self.enabled:
             return
@@ -775,6 +789,8 @@ class ProgressReporter:
             f"[clang-ast] {spinner} {completed}/{total_display}{percent_display} "
             f"ETA {self._format_eta(eta)} · {self._rel_path(path, root)}"
         )
+        if status:
+            line = f"{line} — {status}"
 
         if self.is_tty:
             padding = " " * max(0, self.last_line_len - len(line))
@@ -799,6 +815,173 @@ class ProgressReporter:
             self.logger.info(message)
         else:
             print(f"[clang-ast] {message}", file=self.stream)
+
+
+class NullUI:
+    def __init__(self) -> None:
+        self.root = Path(".")
+
+    def scan_update(self, *args, **kwargs) -> None:
+        return
+
+    def scan_finish(self, *args, **kwargs) -> None:
+        return
+
+    def parse_update(self, *args, **kwargs) -> None:
+        return
+
+    def parse_finish(self, *args, **kwargs) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+class ConsoleUI:
+    def __init__(self, root: Path, enabled: bool, logger: logging.Logger) -> None:
+        self.root = root
+        self.logger = logger
+        self.enabled = enabled
+        self.scan_progress = ProgressReporter(None, enabled, sys.stderr, logger, unit="path")
+        self.parse_progress: Optional[ProgressReporter] = None
+
+    def scan_update(self, count: int, path: Path) -> None:
+        self.scan_progress.update(count, path, self.root)
+
+    def scan_finish(self, total: int) -> None:
+        self.scan_progress.finish(total_override=total)
+
+    def parse_update(self, done: int, total: int, path: Path, status: Optional[str] = None) -> None:
+        if self.parse_progress is None:
+            self.parse_progress = ProgressReporter(total, self.enabled, sys.stderr, self.logger, unit="file")
+        self.parse_progress.update(done, path, self.root, status=status)
+
+    def parse_finish(self, done: int) -> None:
+        if self.parse_progress:
+            self.parse_progress.finish(total_override=done)
+
+    def close(self) -> None:
+        return
+
+
+class CursesUI:
+    def __init__(self, root: Path, logger: logging.Logger) -> None:
+        if curses is None:
+            raise RuntimeError("curses is not available on this platform")
+        self.root = root
+        self.logger = logger
+        self.screen = curses.initscr()
+        curses.noecho()
+        curses.cbreak()
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
+        self.start = time.monotonic()
+        self.parse_start: Optional[float] = None
+        self.scan_count = 0
+        self.scan_path = ""
+        self.parse_done = 0
+        self.parse_total: Optional[int] = None
+        self.parse_path = ""
+        self.status = ""
+
+    def _safe_addstr(self, y: int, x: int, text: str) -> None:
+        try:
+            self.screen.addstr(y, x, text)
+        except Exception:
+            pass
+
+    def _rel_path(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.root))
+        except Exception:
+            return str(path)
+
+    def _format_eta(self) -> str:
+        if not self.parse_total or self.parse_done == 0:
+            return "unknown"
+        baseline = self.parse_start or self.start
+        elapsed = time.monotonic() - baseline
+        rate = self.parse_done / elapsed if elapsed > 0 else 0.0
+        if rate <= 0:
+            return "unknown"
+        remaining = max(self.parse_total - self.parse_done, 0)
+        seconds = remaining / rate
+        if seconds >= 3600:
+            return f"{int(seconds // 3600)}h {int((seconds % 3600)//60):02d}m"
+        if seconds >= 60:
+            return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
+        return f"{int(seconds)}s"
+
+    def _draw(self) -> None:
+        self.screen.erase()
+        header = "clang-ast: exporting AST to JSON"
+        self._safe_addstr(0, 0, header[: curses.COLS - 1])
+
+        scan_line = f"Scanning: {self.scan_count} path(s)"
+        if self.scan_path:
+            scan_line += f" · {self.scan_path}"
+        self._safe_addstr(2, 0, scan_line[: curses.COLS - 1])
+
+        parse_line = f"Parsing: {self.parse_done}"
+        if self.parse_total:
+            parse_line += f"/{self.parse_total}"
+            percent = (self.parse_done / self.parse_total) * 100 if self.parse_total else 0
+            parse_line += f" ({percent:5.1f}%)"
+        parse_line += f" ETA {self._format_eta()}"
+        if self.parse_path:
+            parse_line += f" · {self.parse_path}"
+        self._safe_addstr(4, 0, parse_line[: curses.COLS - 1])
+
+        if self.status:
+            self._safe_addstr(6, 0, f"Status: {self.status}"[: curses.COLS - 1])
+
+        self.screen.refresh()
+
+    def scan_update(self, count: int, path: Path) -> None:
+        self.scan_count = count
+        self.scan_path = self._rel_path(path)
+        self._draw()
+
+    def scan_finish(self, total: int) -> None:
+        self.scan_count = total
+        self._draw()
+
+    def parse_update(self, done: int, total: int, path: Path, status: Optional[str] = None) -> None:
+        self.parse_done = done
+        self.parse_total = total
+        self.parse_path = self._rel_path(path)
+        if self.parse_start is None:
+            self.parse_start = time.monotonic()
+        if status:
+            self.status = status
+        self._draw()
+
+    def parse_finish(self, done: int) -> None:
+        self.parse_done = done
+        self._draw()
+
+    def close(self) -> None:
+        try:
+            curses.nocbreak()
+            curses.echo()
+            curses.endwin()
+        except Exception:
+            pass
+
+
+def create_ui(root: Path, args: argparse.Namespace) -> Any:
+    if args.no_progress:
+        return NullUI()
+    if getattr(args, "curses_ui", False):
+        try:
+            if sys.stderr.isatty():
+                return CursesUI(root, LOGGER)
+            LOGGER.warning("Curses UI requested but stderr is not a TTY; using console progress")
+        except Exception as exc:
+            LOGGER.warning("Curses UI unavailable (%s); falling back to console progress", exc)
+    return ConsoleUI(root, True, LOGGER)
 
 
 def run() -> None:
@@ -840,6 +1023,12 @@ def run() -> None:
         help="Disable the interactive progress indicator.",
     )
     parser.add_argument(
+        "--curses",
+        dest="curses_ui",
+        action="store_true",
+        help="Use a curses-based UI (TTY only; falls back to console progress).",
+    )
+    parser.add_argument(
         "--log-file",
         type=Path,
         default=Path("clang_ast.log"),
@@ -861,11 +1050,10 @@ def run() -> None:
         LOGGER.warning("No libclang override found; relying on defaults")
 
     root_path = Path(args.root)
+    ui = create_ui(root_path, args)
+
     LOGGER.info("Scanning %s for source files...", root_path)
-    scan_progress = ProgressReporter(
-        None, not args.no_progress, sys.stderr, LOGGER, unit="path"
-    )
-    sources = gather_sources(root_path, args.extensions, scan_progress)
+    sources = gather_sources(root_path, args.extensions, ui)
     LOGGER.info("Found %d source files under %s", len(sources), root_path)
     if args.limit:
         sources = sources[: args.limit]
@@ -892,13 +1080,9 @@ def run() -> None:
     include_seen: Set[tuple[str, bool]] = set()
     diagnostics: List[Dict[str, Any]] = []
 
-    progress = ProgressReporter(
-        len(sources), not args.no_progress, sys.stderr, LOGGER, unit="file"
-    )
-
     try:
         for idx, path in enumerate(sources, start=1):
-            progress.update(idx - 1, path, root_path)
+            ui.parse_update(idx - 1, len(sources), path, status="parsing")
             LOGGER.debug("Parsing %s", path)
             tu = parse_translation_unit(clang_index, path, parse_args, options)
             if tu:
@@ -913,12 +1097,18 @@ def run() -> None:
                     file_decls.append(inc)
 
                 local_seen: Set[str] = set()
+                child_counter = 0
                 for child in tu.cursor.get_children():
                     if not in_source_tree(child, [root_path]):
                         continue
                     loc_file = child.location.file.name if child.location and child.location.file else None
                     if not loc_file or Path(loc_file).resolve() != path.resolve():
                         continue
+                    child_counter += 1
+                    if child_counter % 25 == 0:
+                        ui.parse_update(
+                            idx - 1, len(sources), path, status=f"processing {cursor_status(child)}"
+                        )
                     decl_json = cursor_to_decl(child, [root_path], local_seen, file_id)
                     if decl_json:
                         file_decls.append(decl_json)
@@ -931,9 +1121,10 @@ def run() -> None:
                     {"id": file_id, "parent": program_id, "file": rel_path, "decls": file_decls}
                 )
 
-            progress.update(idx, path, root_path)
+            ui.parse_update(idx, len(sources), path, status="parsed")
     finally:
-        progress.finish()
+        ui.parse_finish(len(sources))
+        ui.close()
 
     output: Dict[str, Any] = {
         "program": {"id": program_id, "files": program_files},
