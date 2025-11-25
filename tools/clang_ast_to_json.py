@@ -22,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from uuid import uuid4
 
 import clang
 from clang import cindex
@@ -85,6 +86,20 @@ if NON_TYPE_TEMPLATE_PARAM_KIND is not None:
     TEMPLATE_PARAM_KINDS.append(NON_TYPE_TEMPLATE_PARAM_KIND)
 
 LOGGER = logging.getLogger("clang_ast")
+
+
+def new_id() -> str:
+    return str(uuid4())
+
+
+def make_node(
+    data: Dict[str, Any], parent_id: Optional[str], node_id: Optional[str] = None
+) -> Dict[str, Any]:
+    node = dict(data)
+    node["id"] = node_id or new_id()
+    if parent_id is not None:
+        node["parent"] = parent_id
+    return node
 
 
 def configure_libclang(explicit_library: Optional[str]) -> Optional[Path]:
@@ -281,33 +296,39 @@ def param_to_json(cursor: Cursor) -> Dict[str, Any]:
     return {"name": cursor.spelling, "type": type_to_json(cursor.type)}
 
 
-def enum_to_json(cursor: Cursor, seen: Set[str]) -> Dict[str, Any]:
+def enum_to_json(cursor: Cursor, seen: Set[str], parent_id: Optional[str]) -> Dict[str, Any]:
     usr = cursor.get_usr()
     if usr:
         seen.add(usr)
-    return {
-        "kind": "enum",
-        "name": cursor.spelling,
-        "scoped": cursor.is_scoped_enum(),
-        "underlying_type": type_to_json(cursor.enum_type),
-        "enumerators": [
-            {"name": child.spelling, "value": child.enum_value}
-            for child in cursor.get_children()
-            if child.kind == CursorKind.ENUM_CONSTANT_DECL
-        ],
-    }
+    return make_node(
+        {
+            "kind": "enum",
+            "name": cursor.spelling,
+            "scoped": cursor.is_scoped_enum(),
+            "underlying_type": type_to_json(cursor.enum_type),
+            "enumerators": [
+                {"name": child.spelling, "value": child.enum_value}
+                for child in cursor.get_children()
+                if child.kind == CursorKind.ENUM_CONSTANT_DECL
+            ],
+        },
+        parent_id,
+    )
 
 
-def using_alias_to_json(cursor: Cursor, seen: Set[str]) -> Dict[str, Any]:
+def using_alias_to_json(cursor: Cursor, seen: Set[str], parent_id: Optional[str]) -> Dict[str, Any]:
     usr = cursor.get_usr()
     if usr:
         seen.add(usr)
     aliased = cursor.underlying_typedef_type
-    return {
-        "kind": "using_alias",
-        "name": cursor.spelling,
-        "aliased_type": type_to_json(aliased),
-    }
+    return make_node(
+        {
+            "kind": "using_alias",
+            "name": cursor.spelling,
+            "aliased_type": type_to_json(aliased),
+        },
+        parent_id,
+    )
 
 
 def method_common(cursor: Cursor) -> Dict[str, Any]:
@@ -331,7 +352,7 @@ def method_common(cursor: Cursor) -> Dict[str, Any]:
     }
 
 
-def constructor_to_json(cursor: Cursor) -> Dict[str, Any]:
+def constructor_to_json(cursor: Cursor, parent_id: Optional[str]) -> Dict[str, Any]:
     data = method_common(cursor)
     data.update(
         {
@@ -342,10 +363,10 @@ def constructor_to_json(cursor: Cursor) -> Dict[str, Any]:
             "is_move": cursor.is_move_constructor(),
         }
     )
-    return data
+    return make_node(data, parent_id)
 
 
-def destructor_to_json(cursor: Cursor) -> Dict[str, Any]:
+def destructor_to_json(cursor: Cursor, parent_id: Optional[str]) -> Dict[str, Any]:
     data = method_common(cursor)
     data.update(
         {
@@ -353,10 +374,10 @@ def destructor_to_json(cursor: Cursor) -> Dict[str, Any]:
             "is_virtual": cursor.is_virtual_method(),
         }
     )
-    return data
+    return make_node(data, parent_id)
 
 
-def method_to_json(cursor: Cursor) -> Dict[str, Any]:
+def method_to_json(cursor: Cursor, parent_id: Optional[str]) -> Dict[str, Any]:
     data = method_common(cursor)
     data.update(
         {
@@ -364,32 +385,41 @@ def method_to_json(cursor: Cursor) -> Dict[str, Any]:
             "return_type": type_to_json(cursor.result_type),
         }
     )
-    return data
+    return make_node(data, parent_id)
 
 
-def static_field_to_json(cursor: Cursor) -> Dict[str, Any]:
-    return {
-        "kind": "static_field",
-        "name": cursor.spelling,
-        "access": access_name(cursor.access_specifier),
-        "type": type_to_json(cursor.type),
-    }
+def static_field_to_json(cursor: Cursor, parent_id: Optional[str]) -> Dict[str, Any]:
+    return make_node(
+        {
+            "kind": "static_field",
+            "name": cursor.spelling,
+            "access": access_name(cursor.access_specifier),
+            "type": type_to_json(cursor.type),
+        },
+        parent_id,
+    )
 
 
-def field_to_json(cursor: Cursor) -> Dict[str, Any]:
-    return {
-        "kind": "field",
-        "name": cursor.spelling,
-        "access": access_name(cursor.access_specifier),
-        "type": type_to_json(cursor.type),
-    }
+def field_to_json(cursor: Cursor, parent_id: Optional[str]) -> Dict[str, Any]:
+    return make_node(
+        {
+            "kind": "field",
+            "name": cursor.spelling,
+            "access": access_name(cursor.access_specifier),
+            "type": type_to_json(cursor.type),
+        },
+        parent_id,
+    )
 
 
-def record_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Dict[str, Any]:
+def record_to_json(
+    cursor: Cursor, roots: Iterable[Path], seen: Set[str], parent_id: Optional[str]
+) -> Dict[str, Any]:
     usr = cursor.get_usr()
     if usr:
         seen.add(usr)
 
+    node_id = new_id()
     members: List[Dict[str, Any]] = []
     bases: List[Dict[str, Any]] = []
     for child in cursor.get_children():
@@ -406,40 +436,47 @@ def record_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Dic
             continue
 
         if child.kind == CursorKind.FIELD_DECL:
-            members.append(field_to_json(child))
+            members.append(field_to_json(child, node_id))
         elif child.kind == CursorKind.VAR_DECL:
-            members.append(static_field_to_json(child))
+            members.append(static_field_to_json(child, node_id))
         elif child.kind == CursorKind.CXX_METHOD:
-            members.append(method_to_json(child))
+            members.append(method_to_json(child, node_id))
         elif child.kind == CursorKind.CONSTRUCTOR:
-            members.append(constructor_to_json(child))
+            members.append(constructor_to_json(child, node_id))
         elif child.kind == CursorKind.DESTRUCTOR:
-            members.append(destructor_to_json(child))
+            members.append(destructor_to_json(child, node_id))
         elif child.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
-            nested = record_to_json(child, roots, seen)
+            nested = record_to_json(child, roots, seen, node_id)
             if nested:
                 members.append(nested)
         elif child.kind == CursorKind.FUNCTION_TEMPLATE:
-            templ = function_template_to_json(child, roots, seen)
+            templ = function_template_to_json(child, roots, seen, node_id)
             if templ:
                 members.append(templ)
 
-    return {
-        "kind": "class" if cursor.kind == CursorKind.CLASS_DECL else "struct",
-        "name": cursor.spelling,
-        "access": access_name(cursor.access_specifier),
-        "is_abstract": cursor.is_abstract_record(),
-        "bases": bases,
-        "template_params": [],
-        "members": members,
-    }
+    return make_node(
+        {
+            "kind": "class" if cursor.kind == CursorKind.CLASS_DECL else "struct",
+            "name": cursor.spelling,
+            "access": access_name(cursor.access_specifier),
+            "is_abstract": cursor.is_abstract_record(),
+            "bases": bases,
+            "template_params": [],
+            "members": members,
+        },
+        parent_id,
+        node_id=node_id,
+    )
 
 
-def class_template_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Dict[str, Any]:
+def class_template_to_json(
+    cursor: Cursor, roots: Iterable[Path], seen: Set[str], parent_id: Optional[str]
+) -> Dict[str, Any]:
     usr = cursor.get_usr()
     if usr:
         seen.add(usr)
 
+    node_id = new_id()
     params: List[Dict[str, Any]] = []
     members: List[Dict[str, Any]] = []
 
@@ -453,19 +490,25 @@ def class_template_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]
                 }
             )
         elif child.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
-            members.append(record_to_json(child, roots, seen))
+            members.append(record_to_json(child, roots, seen, node_id))
 
-    return {
-        "kind": "class_template",
-        "name": cursor.spelling,
-        "template_params": params,
-        "bases": [],
-        "members": members,
-        "access": access_name(cursor.access_specifier),
-    }
+    return make_node(
+        {
+            "kind": "class_template",
+            "name": cursor.spelling,
+            "template_params": params,
+            "bases": [],
+            "members": members,
+            "access": access_name(cursor.access_specifier),
+        },
+        parent_id,
+        node_id=node_id,
+    )
 
 
-def function_to_json(cursor: Cursor, seen: Set[str]) -> Dict[str, Any]:
+def function_to_json(
+    cursor: Cursor, seen: Set[str], parent_id: Optional[str]
+) -> Dict[str, Any]:
     usr = cursor.get_usr()
     if usr:
         seen.add(usr)
@@ -474,19 +517,24 @@ def function_to_json(cursor: Cursor, seen: Set[str]) -> Dict[str, Any]:
     is_noexcept = exception_kind in NOEXCEPT_KINDS if exception_kind is not None else False
 
     storage = cursor.storage_class.name.lower() if cursor.storage_class else "none"
-    return {
-        "kind": "function",
-        "name": cursor.spelling,
-        "linkage": cursor.linkage.name.lower(),
-        "storage_class": storage,
-        "return_type": type_to_json(cursor.result_type),
-        "is_variadic": cursor.type.is_function_variadic(),
-        "is_noexcept": is_noexcept,
-        "params": [param_to_json(arg) for arg in cursor.get_arguments()],
-    }
+    return make_node(
+        {
+            "kind": "function",
+            "name": cursor.spelling,
+            "linkage": cursor.linkage.name.lower(),
+            "storage_class": storage,
+            "return_type": type_to_json(cursor.result_type),
+            "is_variadic": cursor.type.is_function_variadic(),
+            "is_noexcept": is_noexcept,
+            "params": [param_to_json(arg) for arg in cursor.get_arguments()],
+        },
+        parent_id,
+    )
 
 
-def function_template_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Optional[Dict[str, Any]]:
+def function_template_to_json(
+    cursor: Cursor, roots: Iterable[Path], seen: Set[str], parent_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
     usr = cursor.get_usr()
     if usr and usr in seen:
         return None
@@ -508,73 +556,96 @@ def function_template_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[s
             func_decl = child
 
     func_json: Dict[str, Any] = (
-        function_to_json(func_decl, seen) if func_decl is not None else {"kind": "function"}
+        function_to_json(func_decl, seen, parent_id)
+        if func_decl is not None
+        else {"kind": "function"}
     )
     func_json.update({"kind": "function_template", "template_params": params})
+    if "id" not in func_json:
+        func_json["id"] = new_id()
+    if parent_id is not None:
+        func_json["parent"] = parent_id
     return func_json
 
 
-def namespace_to_json(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Dict[str, Any]:
+def namespace_to_json(
+    cursor: Cursor, roots: Iterable[Path], seen: Set[str], parent_id: Optional[str]
+) -> Dict[str, Any]:
     usr = cursor.get_usr()
     if usr:
         seen.add(usr)
+    node_id = new_id()
     decls: List[Dict[str, Any]] = []
     for child in cursor.get_children():
         if not in_source_tree(child, roots):
             continue
-        child_json = cursor_to_decl(child, roots, seen)
+        child_json = cursor_to_decl(child, roots, seen, node_id)
         if child_json:
             decls.append(child_json)
 
-    return {
-        "kind": "namespace",
-        "name": cursor.spelling,
-        "inline": is_inline_namespace(cursor),
-        "decls": decls,
-    }
+    return make_node(
+        {
+            "kind": "namespace",
+            "name": cursor.spelling,
+            "inline": is_inline_namespace(cursor),
+            "decls": decls,
+        },
+        parent_id,
+        node_id=node_id,
+    )
 
 
-def cursor_to_decl(cursor: Cursor, roots: Iterable[Path], seen: Set[str]) -> Optional[Dict[str, Any]]:
+def cursor_to_decl(
+    cursor: Cursor, roots: Iterable[Path], seen: Set[str], parent_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
     usr = cursor.get_usr()
     if usr and usr in seen:
         return None
 
     if cursor.kind == CursorKind.NAMESPACE:
-        return namespace_to_json(cursor, roots, seen)
+        return namespace_to_json(cursor, roots, seen, parent_id)
     if cursor.kind in (CursorKind.CLASS_DECL, CursorKind.STRUCT_DECL):
         if not cursor.is_definition():
             return None
-        return record_to_json(cursor, roots, seen)
+        return record_to_json(cursor, roots, seen, parent_id)
     if cursor.kind == CursorKind.CLASS_TEMPLATE:
-        return class_template_to_json(cursor, roots, seen)
+        return class_template_to_json(cursor, roots, seen, parent_id)
     if cursor.kind == CursorKind.ENUM_DECL:
-        return enum_to_json(cursor, seen)
+        return enum_to_json(cursor, seen, parent_id)
     if cursor.kind in (CursorKind.TYPE_ALIAS_DECL, CursorKind.TYPEDEF_DECL):
-        return using_alias_to_json(cursor, seen)
+        return using_alias_to_json(cursor, seen, parent_id)
     if cursor.kind == CursorKind.FUNCTION_TEMPLATE:
-        return function_template_to_json(cursor, roots, seen)
+        return function_template_to_json(cursor, roots, seen, parent_id)
     if cursor.kind == CursorKind.FUNCTION_DECL:
         if not cursor.is_definition():
             return None
-        return function_to_json(cursor, seen)
+        return function_to_json(cursor, seen, parent_id)
     if cursor.kind == CursorKind.VAR_DECL and cursor.semantic_parent.kind == CursorKind.TRANSLATION_UNIT:
         if usr:
             seen.add(usr)
-        return {
-            "kind": "global_variable",
-            "name": cursor.spelling,
-            "type": type_to_json(cursor.type),
-        }
+        return make_node(
+            {
+                "kind": "global_variable",
+                "name": cursor.spelling,
+                "type": type_to_json(cursor.type),
+            },
+            parent_id,
+        )
     if cursor.kind == CursorKind.INCLUSION_DIRECTIVE:
-        return {
-            "kind": "include",
-            "spelling": cursor.spelling,
-            "is_system": cursor.is_in_system_header(),
-        }
+        return make_node(
+            {
+                "kind": "include",
+                "spelling": cursor.spelling,
+                "is_system": cursor.is_in_system_header(),
+            },
+            parent_id,
+        )
     return None
 
 
-def translation_unit_includes(tu: TranslationUnit, root: Path, source_path: Path) -> List[Dict[str, Any]]:
+def translation_unit_includes(
+    tu: TranslationUnit, root: Path, source_path: Path, parent_id: Optional[str]
+) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for inc in tu.get_includes():
         if not inc.include:
@@ -590,11 +661,14 @@ def translation_unit_includes(tu: TranslationUnit, root: Path, source_path: Path
             continue
         is_system = not str(resolved).startswith(str(root.resolve()))
         result.append(
-            {
-                "kind": "include",
-                "spelling": inc.include.name,
-                "is_system": is_system,
-            }
+            make_node(
+                {
+                    "kind": "include",
+                    "spelling": inc.include.name,
+                    "is_system": is_system,
+                },
+                parent_id,
+            )
         )
     return result
 
@@ -813,6 +887,7 @@ def run() -> None:
         TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | TranslationUnit.PARSE_INCOMPLETE
     )
 
+    program_id = new_id()
     program_files: List[Dict[str, Any]] = []
     include_seen: Set[tuple[str, bool]] = set()
     diagnostics: List[Dict[str, Any]] = []
@@ -830,7 +905,8 @@ def run() -> None:
                 diagnostics.extend(diagnostics_to_json(path, tu))
 
                 file_decls: List[Dict[str, Any]] = []
-                for inc in translation_unit_includes(tu, root_path, path):
+                file_id = new_id()
+                for inc in translation_unit_includes(tu, root_path, path, file_id):
                     key = (inc["spelling"], inc["is_system"])
                     if key not in include_seen:
                         include_seen.add(key)
@@ -843,7 +919,7 @@ def run() -> None:
                     loc_file = child.location.file.name if child.location and child.location.file else None
                     if not loc_file or Path(loc_file).resolve() != path.resolve():
                         continue
-                    decl_json = cursor_to_decl(child, [root_path], local_seen)
+                    decl_json = cursor_to_decl(child, [root_path], local_seen, file_id)
                     if decl_json:
                         file_decls.append(decl_json)
 
@@ -851,13 +927,18 @@ def run() -> None:
                     rel_path = str(path.relative_to(root_path))
                 except ValueError:
                     rel_path = str(path)
-                program_files.append({"file": rel_path, "decls": file_decls})
+                program_files.append(
+                    {"id": file_id, "parent": program_id, "file": rel_path, "decls": file_decls}
+                )
 
             progress.update(idx, path, root_path)
     finally:
         progress.finish()
 
-    output: Dict[str, Any] = {"program": {"files": program_files}, "diagnostics": diagnostics}
+    output: Dict[str, Any] = {
+        "program": {"id": program_id, "files": program_files},
+        "diagnostics": diagnostics,
+    }
     LOGGER.info("Writing JSON output to %s", args.output)
     args.output.write_text(json.dumps(output, indent=2))
     decl_count = sum(len(f["decls"]) for f in program_files)
