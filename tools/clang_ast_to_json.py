@@ -12,10 +12,13 @@ method bodies are not expanded to keep the output tractable for the full
 from __future__ import annotations
 
 import argparse
+import logging
+import itertools
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
@@ -80,6 +83,8 @@ TEMPLATE_PARAM_KINDS: List[CursorKind] = [
 if NON_TYPE_TEMPLATE_PARAM_KIND is not None:
     TEMPLATE_PARAM_KINDS.append(NON_TYPE_TEMPLATE_PARAM_KIND)
 
+LOGGER = logging.getLogger("clang_ast")
+
 
 def configure_libclang(explicit_library: Optional[str]) -> Optional[Path]:
     """
@@ -106,6 +111,34 @@ def configure_libclang(explicit_library: Optional[str]) -> Optional[Path]:
         return Path(env_path)
 
     return None
+
+
+def setup_logging(log_file: Path, console_level: str) -> logging.Logger:
+    logger = LOGGER
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    if log_file.parent:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    fmt_file = logging.Formatter(
+        "[%(asctime)s] %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(fmt_file)
+    logger.addHandler(file_handler)
+
+    level = getattr(logging, console_level.upper(), logging.INFO)
+    fmt_console = logging.Formatter("[clang-ast] %(message)s")
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(fmt_console)
+    logger.addHandler(console_handler)
+
+    logger.debug("Logging configured; console level=%s, file=%s", console_level.upper(), log_file)
+    return logger
 
 
 def detect_resource_includes() -> List[str]:
@@ -576,8 +609,69 @@ def parse_translation_unit(
     try:
         return index.parse(str(path), args=args, options=options)
     except cindex.TranslationUnitLoadError as exc:
-        print(f"[clang-ast] Failed to parse {path}: {exc}", file=sys.stderr)
+        LOGGER.error("Failed to parse %s: %s", path, exc)
         return None
+
+
+class ProgressReporter:
+    def __init__(
+        self, total: int, enabled: bool, stream, logger: Optional[logging.Logger] = None
+    ) -> None:
+        self.total = total
+        self.enabled = enabled
+        self.stream = stream
+        self.is_tty = stream.isatty()
+        self.spinner = itertools.cycle("-\\|/")
+        self.start = time.monotonic()
+        self.last_emit = self.start
+        self.last_line_len = 0
+        self.logger = logger
+
+    def _rel_path(self, path: Path, root: Path) -> str:
+        try:
+            return str(path.relative_to(root))
+        except ValueError:
+            return str(path)
+
+    def update(self, index: int, path: Path, root: Path) -> None:
+        if not self.enabled:
+            return
+
+        now = time.monotonic()
+        # Avoid spamming when stderr is redirected; otherwise keep the spinner lively.
+        if not self.is_tty and (now - self.last_emit) < 5 and index != self.total:
+            return
+        self.last_emit = now
+
+        percent = (index / self.total * 100) if self.total else 0.0
+        spinner = next(self.spinner) if self.is_tty else "~"
+        line = (
+            f"[clang-ast] {spinner} {index}/{self.total} ({percent:5.1f}%) "
+            f"ETA unknown · {self._rel_path(path, root)}"
+        )
+
+        if self.is_tty:
+            padding = " " * max(0, self.last_line_len - len(line))
+            print(f"\r{line}{padding}", end="", file=self.stream, flush=True)
+            self.last_line_len = max(self.last_line_len, len(line))
+        else:
+            print(line, file=self.stream)
+
+    def finish(self) -> None:
+        if not self.enabled and not self.logger:
+            return
+
+        duration = time.monotonic() - self.start
+        message = (
+            f"Processed {self.total} file(s) in {duration:.1f}s; ETA was unknown during run"
+        )
+        if self.is_tty:
+            clear = " " * self.last_line_len
+            print(f"\r{clear}\r", end="", file=self.stream)
+        if self.logger:
+            self.logger.info(message)
+        else:
+            print(f"[clang-ast] {message}", file=self.stream)
 
 
 def run() -> None:
@@ -613,26 +707,51 @@ def run() -> None:
         default=None,
         help="Explicit path to libclang shared library if auto-detection fails.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable the interactive progress indicator.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=Path("clang_ast.log"),
+        help="Path to verbose log output (default: clang_ast.log).",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Console log level (default: INFO).",
+    )
     args = parser.parse_args()
+
+    setup_logging(args.log_file, args.log_level)
 
     lib_used = configure_libclang(args.libclang)
     if lib_used:
-        print(f"[clang-ast] Using libclang at {lib_used}", file=sys.stderr)
+        LOGGER.info("Using libclang at %s", lib_used)
     else:
-        print("[clang-ast] Warning: no libclang override found; relying on defaults", file=sys.stderr)
+        LOGGER.warning("No libclang override found; relying on defaults")
 
     root_path = Path(args.root)
     sources = gather_sources(root_path, args.extensions)
+    LOGGER.info("Found %d source files under %s", len(sources), root_path)
     if args.limit:
         sources = sources[: args.limit]
+        LOGGER.info("Limiting processing to first %d file(s)", len(sources))
     if not sources:
-        print(f"[clang-ast] No sources found under {root_path}", file=sys.stderr)
+        LOGGER.error("No sources found under %s", root_path)
         sys.exit(1)
 
     include_args = detect_resource_includes()
+    if include_args:
+        LOGGER.debug("Detected resource includes: %s", include_args)
+    else:
+        LOGGER.debug("No resource includes detected")
     parse_args = ["-std=c++17", f"-I{root_path}"] + include_args + args.compile_args
+    LOGGER.debug("Compile arguments: %s", parse_args)
 
-    index = cindex.Index.create()
+    clang_index = cindex.Index.create()
     options = (
         TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | TranslationUnit.PARSE_INCOMPLETE
     )
@@ -641,42 +760,47 @@ def run() -> None:
     include_seen: Set[tuple[str, bool]] = set()
     diagnostics: List[Dict[str, Any]] = []
 
-    for path in sources:
-        tu = parse_translation_unit(index, path, parse_args, options)
-        if not tu:
-            continue
-        diagnostics.extend(diagnostics_to_json(path, tu))
+    progress = ProgressReporter(len(sources), not args.no_progress, sys.stderr, LOGGER)
 
-        file_decls: List[Dict[str, Any]] = []
-        for inc in translation_unit_includes(tu, root_path, path):
-            key = (inc["spelling"], inc["is_system"])
-            if key not in include_seen:
-                include_seen.add(key)
-            file_decls.append(inc)
-
-        local_seen: Set[str] = set()
-        for child in tu.cursor.get_children():
-            if not in_source_tree(child, [root_path]):
+    try:
+        for idx, path in enumerate(sources, start=1):
+            progress.update(idx, path, root_path)
+            LOGGER.debug("Parsing %s", path)
+            tu = parse_translation_unit(clang_index, path, parse_args, options)
+            if not tu:
                 continue
-            loc_file = child.location.file.name if child.location and child.location.file else None
-            if not loc_file or Path(loc_file).resolve() != path.resolve():
-                continue
-            decl_json = cursor_to_decl(child, [root_path], local_seen)
-            if decl_json:
-                file_decls.append(decl_json)
+            diagnostics.extend(diagnostics_to_json(path, tu))
 
-        try:
-            rel_path = str(path.relative_to(root_path))
-        except ValueError:
-            rel_path = str(path)
-        program_files.append({"file": rel_path, "decls": file_decls})
+            file_decls: List[Dict[str, Any]] = []
+            for inc in translation_unit_includes(tu, root_path, path):
+                key = (inc["spelling"], inc["is_system"])
+                if key not in include_seen:
+                    include_seen.add(key)
+                file_decls.append(inc)
+
+            local_seen: Set[str] = set()
+            for child in tu.cursor.get_children():
+                if not in_source_tree(child, [root_path]):
+                    continue
+                loc_file = child.location.file.name if child.location and child.location.file else None
+                if not loc_file or Path(loc_file).resolve() != path.resolve():
+                    continue
+                decl_json = cursor_to_decl(child, [root_path], local_seen)
+                if decl_json:
+                    file_decls.append(decl_json)
+
+            try:
+                rel_path = str(path.relative_to(root_path))
+            except ValueError:
+                rel_path = str(path)
+            program_files.append({"file": rel_path, "decls": file_decls})
+    finally:
+        progress.finish()
 
     output: Dict[str, Any] = {"program": {"files": program_files}, "diagnostics": diagnostics}
     args.output.write_text(json.dumps(output, indent=2))
-    print(
-        f"[clang-ast] Wrote {args.output} with {sum(len(f['decls']) for f in program_files)} decls",
-        file=sys.stderr,
-    )
+    decl_count = sum(len(f["decls"]) for f in program_files)
+    LOGGER.info("Wrote %s with %d decls", args.output, decl_count)
 
 
 if __name__ == "__main__":
