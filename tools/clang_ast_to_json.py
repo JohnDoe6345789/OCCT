@@ -15,6 +15,7 @@ import argparse
 import logging
 import itertools
 import json
+import math
 import os
 import subprocess
 import sys
@@ -159,13 +160,30 @@ def detect_resource_includes() -> List[str]:
     return []
 
 
-def gather_sources(root: Path, extensions: Sequence[str]) -> List[Path]:
+def gather_sources(
+    root: Path, extensions: Sequence[str], progress: Optional[ProgressReporter] = None
+) -> List[Path]:
     exts = {ext.lower() for ext in extensions}
-    return sorted(
-        p
-        for p in root.rglob("*")
-        if p.suffix.lower() in exts and p.is_file() and "CMakeFiles" not in p.parts
-    )
+    matches: List[Path] = []
+    last_path: Path = root
+    counter = 0
+    try:
+        for counter, path in enumerate(root.rglob("*"), start=1):
+            last_path = path
+            if progress and (counter == 1 or counter % 200 == 0):
+                progress.update(counter, path, root)
+            if (
+                path.suffix.lower() in exts
+                and path.is_file()
+                and "CMakeFiles" not in path.parts
+            ):
+                matches.append(path)
+    finally:
+        if progress:
+            if counter and (counter % 200) != 0:
+                progress.update(counter, last_path, root)
+            progress.finish(total_override=counter or len(matches))
+    return sorted(matches)
 
 
 def in_source_tree(cursor: Cursor, roots: Iterable[Path]) -> bool:
@@ -615,9 +633,14 @@ def parse_translation_unit(
 
 class ProgressReporter:
     def __init__(
-        self, total: int, enabled: bool, stream, logger: Optional[logging.Logger] = None
+        self,
+        total: Optional[int],
+        enabled: bool,
+        stream,
+        logger: Optional[logging.Logger] = None,
+        unit: str = "item",
     ) -> None:
-        self.total = total
+        self.total: Optional[int] = total
         self.enabled = enabled
         self.stream = stream
         self.is_tty = stream.isatty()
@@ -625,7 +648,23 @@ class ProgressReporter:
         self.start = time.monotonic()
         self.last_emit = self.start
         self.last_line_len = 0
+        self.last_completed = 0
         self.logger = logger
+        self.unit = unit
+
+    def _format_eta(self, seconds: Optional[float]) -> str:
+        if seconds is None or not math.isfinite(seconds):
+            return "unknown"
+        seconds = max(0, seconds)
+        if seconds >= 3600:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours}h {minutes:02d}m"
+        if seconds >= 60:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs:02d}s"
+        return f"{int(seconds)}s"
 
     def _rel_path(self, path: Path, root: Path) -> str:
         try:
@@ -633,21 +672,34 @@ class ProgressReporter:
         except ValueError:
             return str(path)
 
-    def update(self, index: int, path: Path, root: Path) -> None:
+    def update(self, completed: int, path: Path, root: Path) -> None:
+        self.last_completed = completed
         if not self.enabled:
             return
 
         now = time.monotonic()
         # Avoid spamming when stderr is redirected; otherwise keep the spinner lively.
-        if not self.is_tty and (now - self.last_emit) < 5 and index != self.total:
+        if not self.is_tty and (now - self.last_emit) < 5 and completed != self.total:
             return
         self.last_emit = now
 
-        percent = (index / self.total * 100) if self.total else 0.0
+        percent: Optional[float] = None
+        if self.total:
+            percent = completed / self.total * 100
+        eta: Optional[float] = None
+        elapsed = now - self.start
+        if completed > 0 and elapsed > 0 and self.total:
+            rate = completed / elapsed
+            remaining = max(self.total - completed, 0)
+            if rate > 0:
+                eta = remaining / rate
+
         spinner = next(self.spinner) if self.is_tty else "~"
+        total_display = str(self.total) if self.total is not None else "?"
+        percent_display = f" ({percent:5.1f}%)" if percent is not None else ""
         line = (
-            f"[clang-ast] {spinner} {index}/{self.total} ({percent:5.1f}%) "
-            f"ETA unknown · {self._rel_path(path, root)}"
+            f"[clang-ast] {spinner} {completed}/{total_display}{percent_display} "
+            f"ETA {self._format_eta(eta)} · {self._rel_path(path, root)}"
         )
 
         if self.is_tty:
@@ -657,15 +709,16 @@ class ProgressReporter:
         else:
             print(line, file=self.stream)
 
-    def finish(self) -> None:
+    def finish(self, total_override: Optional[int] = None) -> None:
         if not self.enabled and not self.logger:
             return
 
         duration = time.monotonic() - self.start
-        message = (
-            f"Processed {self.total} file(s) in {duration:.1f}s; ETA was unknown during run"
-        )
-        if self.is_tty:
+        total_done = total_override if total_override is not None else (self.total or self.last_completed)
+        rate = (total_done / duration) if duration > 0 and total_done else 0.0
+        rate_suffix = f" (~{rate:.1f} {self.unit}/s)" if rate > 0 else ""
+        message = f"Processed {total_done} {self.unit}(s) in {duration:.1f}s{rate_suffix}"
+        if self.is_tty and self.enabled:
             clear = " " * self.last_line_len
             print(f"\r{clear}\r", end="", file=self.stream)
         if self.logger:
@@ -734,7 +787,11 @@ def run() -> None:
         LOGGER.warning("No libclang override found; relying on defaults")
 
     root_path = Path(args.root)
-    sources = gather_sources(root_path, args.extensions)
+    LOGGER.info("Scanning %s for source files...", root_path)
+    scan_progress = ProgressReporter(
+        None, not args.no_progress, sys.stderr, LOGGER, unit="path"
+    )
+    sources = gather_sources(root_path, args.extensions, scan_progress)
     LOGGER.info("Found %d source files under %s", len(sources), root_path)
     if args.limit:
         sources = sources[: args.limit]
@@ -760,44 +817,48 @@ def run() -> None:
     include_seen: Set[tuple[str, bool]] = set()
     diagnostics: List[Dict[str, Any]] = []
 
-    progress = ProgressReporter(len(sources), not args.no_progress, sys.stderr, LOGGER)
+    progress = ProgressReporter(
+        len(sources), not args.no_progress, sys.stderr, LOGGER, unit="file"
+    )
 
     try:
         for idx, path in enumerate(sources, start=1):
-            progress.update(idx, path, root_path)
+            progress.update(idx - 1, path, root_path)
             LOGGER.debug("Parsing %s", path)
             tu = parse_translation_unit(clang_index, path, parse_args, options)
-            if not tu:
-                continue
-            diagnostics.extend(diagnostics_to_json(path, tu))
+            if tu:
+                diagnostics.extend(diagnostics_to_json(path, tu))
 
-            file_decls: List[Dict[str, Any]] = []
-            for inc in translation_unit_includes(tu, root_path, path):
-                key = (inc["spelling"], inc["is_system"])
-                if key not in include_seen:
-                    include_seen.add(key)
-                file_decls.append(inc)
+                file_decls: List[Dict[str, Any]] = []
+                for inc in translation_unit_includes(tu, root_path, path):
+                    key = (inc["spelling"], inc["is_system"])
+                    if key not in include_seen:
+                        include_seen.add(key)
+                    file_decls.append(inc)
 
-            local_seen: Set[str] = set()
-            for child in tu.cursor.get_children():
-                if not in_source_tree(child, [root_path]):
-                    continue
-                loc_file = child.location.file.name if child.location and child.location.file else None
-                if not loc_file or Path(loc_file).resolve() != path.resolve():
-                    continue
-                decl_json = cursor_to_decl(child, [root_path], local_seen)
-                if decl_json:
-                    file_decls.append(decl_json)
+                local_seen: Set[str] = set()
+                for child in tu.cursor.get_children():
+                    if not in_source_tree(child, [root_path]):
+                        continue
+                    loc_file = child.location.file.name if child.location and child.location.file else None
+                    if not loc_file or Path(loc_file).resolve() != path.resolve():
+                        continue
+                    decl_json = cursor_to_decl(child, [root_path], local_seen)
+                    if decl_json:
+                        file_decls.append(decl_json)
 
-            try:
-                rel_path = str(path.relative_to(root_path))
-            except ValueError:
-                rel_path = str(path)
-            program_files.append({"file": rel_path, "decls": file_decls})
+                try:
+                    rel_path = str(path.relative_to(root_path))
+                except ValueError:
+                    rel_path = str(path)
+                program_files.append({"file": rel_path, "decls": file_decls})
+
+            progress.update(idx, path, root_path)
     finally:
         progress.finish()
 
     output: Dict[str, Any] = {"program": {"files": program_files}, "diagnostics": diagnostics}
+    LOGGER.info("Writing JSON output to %s", args.output)
     args.output.write_text(json.dumps(output, indent=2))
     decl_count = sum(len(f["decls"]) for f in program_files)
     LOGGER.info("Wrote %s with %d decls", args.output, decl_count)
