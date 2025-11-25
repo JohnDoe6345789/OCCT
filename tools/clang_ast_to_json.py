@@ -107,6 +107,13 @@ def make_node(
     return node
 
 
+def rel_to_root(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except Exception:
+        return str(path)
+
+
 def configure_libclang(explicit_library: Optional[str]) -> Optional[Path]:
     """
     Point clang.cindex at a usable libclang shared library.
@@ -1082,8 +1089,9 @@ def run() -> None:
 
     try:
         for idx, path in enumerate(sources, start=1):
-            ui.parse_update(idx - 1, len(sources), path, status="parsing")
-            LOGGER.debug("Parsing %s", path)
+            rel_path = rel_to_root(path, root_path)
+            ui.parse_update(idx - 1, len(sources), path, status=f"parsing {rel_path}")
+            LOGGER.debug("Parsing %s", rel_path)
             tu = parse_translation_unit(clang_index, path, parse_args, options)
             if tu:
                 diagnostics.extend(diagnostics_to_json(path, tu))
@@ -1105,9 +1113,12 @@ def run() -> None:
                     if not loc_file or Path(loc_file).resolve() != path.resolve():
                         continue
                     child_counter += 1
-                    if child_counter % 25 == 0:
+                    if child_counter % 10 == 0:
                         ui.parse_update(
-                            idx - 1, len(sources), path, status=f"processing {cursor_status(child)}"
+                            idx - 1,
+                            len(sources),
+                            path,
+                            status=f"{rel_path}: {cursor_status(child)}",
                         )
                     decl_json = cursor_to_decl(child, [root_path], local_seen, file_id)
                     if decl_json:
@@ -1121,7 +1132,7 @@ def run() -> None:
                     {"id": file_id, "parent": program_id, "file": rel_path, "decls": file_decls}
                 )
 
-            ui.parse_update(idx, len(sources), path, status="parsed")
+            ui.parse_update(idx, len(sources), path, status=f"parsed {rel_path}")
     finally:
         ui.parse_finish(len(sources))
         ui.close()
