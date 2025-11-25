@@ -223,3 +223,54 @@ Below is an informal JSON Schema-style description of the output (trimmed to key
   }
 }
 ```
+
+# JSON -> Python tree loader
+
+`tools/clang_ast_json_to_tree.py` loads the JSON emitted by `clang_ast_to_json.py`
+into a small set of dataclasses so downstream tooling can work with Python
+objects instead of dictionaries.
+
+Quick examples:
+
+```bash
+python3 tools/clang_ast_json_to_tree.py ast.json --records  # prints a summary and record names
+```
+
+```python
+from pathlib import Path
+from tools.clang_ast_json_to_tree import (
+    ClassTemplateDecl,
+    RecordDecl,
+    load_clang_ast,
+)
+
+ast = load_clang_ast(Path("ast.json"))
+records = [
+    decl for decl in ast.walk_decls() if isinstance(decl, (RecordDecl, ClassTemplateDecl))
+]
+print(f"Loaded {len(records)} records")
+```
+
+# Python stubs for every class/function
+
+`tools/clang_ast_to_python_stubs.py` turns the JSON AST into a tree of Python
+stub modules under `python_port/generated` (or another output root). The goal is
+to guarantee a Python replica exists for each C++ class/function in `src/`
+before manual refinement.
+
+Typical workflow:
+
+```bash
+# Export AST (headers + sources) to JSON
+python3 tools/clang_ast_to_json.py --root src --output ast.json
+
+# Dry-run stub generation (headers only by default)
+python3 tools/clang_ast_to_python_stubs.py --ast ast.json --dry-run
+
+# Write stubs to python_port/generated (one file per C++ file)
+python3 tools/clang_ast_to_python_stubs.py --ast ast.json --output-root python_port/generated
+```
+
+Flags:
+- `--limit-files N` to sample a subset while iterating
+- `--all-files` to include `.cxx` alongside headers
