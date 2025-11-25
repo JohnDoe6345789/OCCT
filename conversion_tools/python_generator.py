@@ -5,6 +5,7 @@ Python Stub Generator for OCCT classes.
 Converts C++ class definitions to Python stub files with proper structure.
 """
 
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from cpp_parser import CppClass, CppMethod, CppParameter
@@ -12,6 +13,21 @@ from cpp_parser import CppClass, CppMethod, CppParameter
 
 class PythonMethodGenerator:
     """Generates Python method signatures from C++ definitions."""
+
+    TYPE_ALIAS_MAP: Dict[str, str] = {
+        "standardreal": "float",
+        "standardinteger": "int",
+        "standardboolean": "bool",
+        "standard_transient": "Any",
+        "double": "float",
+        "int": "int",
+        "bool": "bool",
+        "float": "float",
+        "char": "str",
+        "string": "str",
+        "stdstring": "str",
+        "void": "None",
+    }
 
     @staticmethod
     def generate_method_signature(method: CppMethod, include_docstring: bool = True) -> str:
@@ -34,8 +50,8 @@ class PythonMethodGenerator:
         """Convert C++ parameters to Python."""
         py_params = []
         for param in params:
-            py_type = PythonMethodGenerator._convert_cpp_type(param.type_)
-            py_name = PythonMethodGenerator._to_snake_case(param.name)
+        py_type = PythonMethodGenerator._convert_cpp_type(param.type_)
+        py_name = PythonMethodGenerator._to_snake_case(param.name)
             
             if param.default_value:
                 default = PythonMethodGenerator._convert_cpp_value(param.default_value)
@@ -49,37 +65,43 @@ class PythonMethodGenerator:
     def _convert_cpp_type(cpp_type: str) -> str:
         """Convert C++ type to Python type hint."""
         cpp_type = cpp_type.strip()
-        
-        # Handle pointers and references
+
+        # Handle pointers and references before normalization
         is_pointer = '*' in cpp_type
         is_ref = '&' in cpp_type
-        cpp_type = cpp_type.replace('*', '').replace('&', '').strip()
-        
-        # Map standard types
-        type_map = {
-            'Standard_Real': 'float',
-            'Standard_Integer': 'int',
-            'Standard_Boolean': 'bool',
-            'void': 'None',
-            'double': 'float',
-            'int': 'int',
-            'bool': 'bool',
-            'float': 'float',
-            'char': 'str',
-            'string': 'str',
-            'std::string': 'str',
-        }
-        
-        if cpp_type in type_map:
-            py_type = type_map[cpp_type]
+
+        cleaned_type = PythonMethodGenerator._strip_type_modifiers(cpp_type)
+        canonical = PythonMethodGenerator._canonical_type_key(cleaned_type)
+
+        if canonical in PythonMethodGenerator.TYPE_ALIAS_MAP:
+            py_type = PythonMethodGenerator.TYPE_ALIAS_MAP[canonical]
         else:
-            # For custom classes, convert to PascalCase
-            py_type = PythonMethodGenerator._cpp_class_to_py(cpp_type)
-        
+            py_type = PythonMethodGenerator._cpp_class_to_py(cleaned_type)
+
+        if not py_type:
+            py_type = "Any"
+
         if is_pointer or is_ref:
             py_type = f"Optional[{py_type}]"
-        
+
         return py_type
+
+    @staticmethod
+    def _strip_type_modifiers(cpp_type: str) -> str:
+        """Remove C++ modifiers that are irrelevant for Python names."""
+        cleaned = cpp_type.replace('*', '').replace('&', '')
+        cleaned = re.sub(r'\bconst\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\bvolatile\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.replace('std::', '')
+        cleaned = cleaned.replace('::', '_')
+        cleaned = cleaned.replace('<', '').replace('>', '')
+        cleaned = cleaned.replace('(', '').replace(')', '')
+        return cleaned.strip()
+
+    @staticmethod
+    def _canonical_type_key(type_str: str) -> str:
+        """Generate a lowercase alphanumeric key for alias lookup."""
+        return "".join(ch for ch in type_str if ch.isalnum()).lower()
 
     @staticmethod
     def _cpp_class_to_py(cpp_class: str) -> str:
@@ -91,13 +113,21 @@ class PythonMethodGenerator:
         # Remove common prefixes and suffixes
         cpp_class = cpp_class.strip()
         
-        # For Toolkit_ClassName style, convert to ToolkitClassName
-        parts = cpp_class.split('_')
-        if len(parts) > 1:
-            # It's a Package_Class style name
-            return ''.join(p.capitalize() for p in parts)
-        
-        return cpp_class
+        if not cpp_class:
+            return "Any"
+
+        # Handle template types
+        if '<' in cpp_class:
+            cpp_class = cpp_class[:cpp_class.index('<')]
+
+        sanitized = cpp_class.replace('::', '_')
+        sanitized = re.sub(r'[^0-9A-Za-z_]', '', sanitized)
+        parts = [part for part in sanitized.split('_') if part]
+
+        if not parts:
+            return "Any"
+
+        return "".join(part.capitalize() for part in parts)
 
     @staticmethod
     def _to_snake_case(name: str) -> str:
