@@ -1105,21 +1105,24 @@ def run() -> None:
                     file_decls.append(inc)
 
                 local_seen: Set[str] = set()
-                child_counter = 0
+                relevant_children: List[Cursor] = []
                 for child in tu.cursor.get_children():
                     if not in_source_tree(child, [root_path]):
                         continue
                     loc_file = child.location.file.name if child.location and child.location.file else None
                     if not loc_file or Path(loc_file).resolve() != path.resolve():
                         continue
-                    child_counter += 1
-                    if child_counter % 10 == 0:
-                        ui.parse_update(
-                            idx - 1,
-                            len(sources),
-                            path,
-                            status=f"{rel_path}: {cursor_status(child)}",
-                        )
+                    relevant_children.append(child)
+
+                total_children = len(relevant_children)
+                for child_index, child in enumerate(relevant_children, start=1):
+                    line_no = child.location.line if child.location else None
+                    status_parts = [rel_path, f"[{child_index}/{total_children}]"]
+                    if line_no is not None:
+                        status_parts.append(f"line {line_no}")
+                    status = " ".join(status_parts) + f": {cursor_status(child)}"
+                    ui.parse_update(idx - 1, len(sources), path, status=status)
+
                     decl_json = cursor_to_decl(child, [root_path], local_seen, file_id)
                     if decl_json:
                         file_decls.append(decl_json)
